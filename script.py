@@ -68,8 +68,7 @@ def lambda_handler(event, context):
 
     for order in inflowSaleOrders:
         print("______________________________________________________________")
-        print("Processing order")
-        print(order)
+        print("Processing order: ", order["orderNumber"])
         orderId = order["salesOrderId"]
         # search sf for this id
         sfOrder = getSFOrder(orderId)
@@ -77,7 +76,7 @@ def lambda_handler(event, context):
             print("______________________________________________________________")
             print("Updating sales order")
             # id exists... update record
-            processExistingOrder(inflowSaleOrders,sfOrder,salesforceProducts)
+            processExistingOrder(order,sfOrder,salesforceProducts)
             pass
         else:
             print("______________________________________________________________")
@@ -103,7 +102,7 @@ def getSFOrder(id):
         print("\nGet Order returnted nothing")
         return None
     print("\nGet Orders Results: ", getOrdersResult[0])
-    return getOrdersResult
+    return getOrdersResult[0]
 
 def getSFAccount(id):
     getAccountQuery = f"select Id,name from Account where Customer_Reference_Id__c = '{id}'"
