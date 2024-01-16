@@ -38,7 +38,7 @@ keys_to_extract = [
     "isCancelled", "isCompleted", "isInvoiced", "isPrioritized",
     "lines", "orderDate", "orderFreight", "orderNumber",
     "orderRemarks", "paymentStatus", "phone", "requestedShipDate",
-    "shippingAddress", "subTotal", "tax1", "tax1Name", "total","timestamp","salesOrderId"
+    "shippingAddress", "subTotal", "tax1", "tax1Name", "total","timestamp","salesOrderId","customer"
 ]
 
 INFLOW_API_KEY = "F922915CB1ACB5D166B8DF914056E0AC4EB35B6155DE17232024CEE97BEE01F9"
@@ -58,25 +58,33 @@ def lambda_handler(event, context):
         print("Error: Invalid JSON Format")
 
     inflowSaleOrders = getInflowSaleOrders()
+    # print("Infow Sale Orders ID: ", inflowSaleOrders)
+
     salesforceProducts = getSFProducts()
-    print("Infow Sale Orders ID: ", inflowSaleOrders)
+
+    if salesforceProducts is None:
+        salesforceProducts = []
     print("SalesForceProducts: ", salesforceProducts)
 
     for order in inflowSaleOrders:
+        print("______________________________________________________________")
+        print("Processing order")
         print(order)
         orderId = order["salesOrderId"]
         # search sf for this id
         sfOrder = getSFOrder(orderId)
         if(sfOrder):
-            print("Updating record")
+            print("______________________________________________________________")
+            print("Updating sales order")
             # id exists... update record
-            # processExistingOrder()
+            processExistingOrder(inflowSaleOrders,sfOrder,salesforceProducts)
             pass
         else:
-            print("Creating record")
+            print("______________________________________________________________")
+            print("Creating sales order")
 
             # id doesnt exist... create record
-            # processNewOrder(order,salesforceProducts)            
+            processNewOrder(order,salesforceProducts)            
             pass
         break
 
@@ -97,48 +105,384 @@ def getSFOrder(id):
     print("\nGet Orders Results: ", getOrdersResult[0])
     return getOrdersResult
 
+def getSFAccount(id):
+    getAccountQuery = f"select Id,name from Account where Customer_Reference_Id__c = '{id}'"
+    print("\nGet Account query: ", getAccountQuery)
+    getAccountResult = sf.query_all(getAccountQuery)["records"]
+    print("\nGet Account Results: ", getAccountResult[0])
+    if len(getAccountResult) < 1:
+        print("\nGet Account returnted nothing")
+        return None
+    
+    return getAccountResult[0]
+
+def createSFAccount(order):
+    print("Creating Account")
+    print(order["salesOrderId"])
+
+    billingAddress = order["billingAddress"]
+    shippingAddress = order["shippingAddress"]
+
+    account = {
+    "Name": order["customer"].get("name", ""),
+    "BillingCity": billingAddress.get("city", ""),
+    "BillingCountry": billingAddress.get("country", ""),
+    "BillingPostalCode": billingAddress.get("postalCode", ""),
+    "BillingState": billingAddress.get("state", ""),
+    "BillingStreet": billingAddress.get("address", ""),
+    "ShippingCity": shippingAddress.get("city", ""),
+    "ShippingCountry": shippingAddress.get("country", ""),
+    "ShippingPostalCode": shippingAddress.get("postalCode", ""),
+    "ShippingState": shippingAddress.get("state", ""),
+    "ShippingStreet": shippingAddress.get("address", ""),
+    "Phone": order["customer"].get("phone", ""),
+    # "Email": order.get("email", ""),
+    "Website": order["customer"].get("website", ""),
+    "Customer_Reference_Id__c": order.get("customer", {}).get("customerId", "") if order.get("customer") else "",
+    "Timestamp__c":order["customer"].get("timestap","")
+    }
+    
+    print("Account details: ",account)
+
+    response = sf.Account.create(account)
+    print("New Account created: ", response.get("id"))
+    return response[0].get("Id")
+
+
+        # Handle other errors if necessary
+        # print("Error creating account: ", errors)
+        # return None
+    
+    # print("New Account created: ", newAccount.get("id"))
+    # return newAccount
+
+def createProduct(productInfo,sfProducts):
+    timestamp = ""
+    if "timestamp" in productInfo:
+        timestamp = productInfo["timestamp"]
+
+    productId = ""
+    if "productId" in productInfo:
+        productId = productInfo["productId"]
+
+    isActive = ""
+    if "isActive" in productInfo:
+        isActive = productInfo["isActive"]
+
+    name = ""
+    if "name" in productInfo:
+        name = productInfo["name"]
+
+    description = ""
+    if "description" in productInfo:
+        description = productInfo["description"]
+
+    print("Timestamp:", timestamp)
+    print("ProductId:", productId)
+    print("isActive:", isActive)
+    print("Name:", name)
+    print("Description: ", description)
+
+    productToCreate = {
+        "timestamp__c": timestamp,
+        "Product_Id__c":productId,
+        "isActive":isActive,
+        "Name":name,
+        "Description":description,
+        "isActive":True,
+    }
+    newProduct = sf.Product2.create(productToCreate)
+    newProductId = newProduct.get("id")
+    productToCreate["Id"] = newProductId
+
+    print("Product created")
+    print(newProduct)
+    sfProducts.append(productToCreate)
+
+    priceBookValues = {
+        "Product2Id" :newProduct["id"], 
+        "UnitPrice":productInfo["defaultPrice"]["unitPrice"],
+        "Pricebook2Id":"01s5j00000Q9jTAAAZ",
+        "IsActive": True
+    }
+    print("PriceBook Entry")
+    print(priceBookValues)
+    priceBook = sf.PricebookEntry.create(priceBookValues)
+    return priceBook
+
+def createOrder(order):
+    print("Creating an Order")
+    print(order)
+    # Extracting order details with checks
+    accountId = getSFAccount(order["customer"]["customerId"]).get("Id")
+    if(accountId == None):
+        accountId = createSFAccount(order)
+    orderNumber = ""
+    if "orderNumber" in order:
+        orderNumber = order["orderNumber"]
+
+    orderDate = ""
+    if "orderDate" in order:
+        orderDate = order["orderDate"]
+
+    dueDate = ""
+    if "dueDate" in order:
+        dueDate = order["dueDate"]
+
+    salesOrderId = ""
+    if "salesOrderId" in order:
+        salesOrderId = order["salesOrderId"]
+
+    total = 0
+    if "total" in order:
+        total = order["total"]
+
+    amountPaid = 0
+    if "amountPaid" in order:
+        amountPaid = order["amountPaid"]
+
+    timestamp = ""
+    if "timestamp" in order:
+        timestamp = order["timestamp"]
+
+    poNumber = ""
+    if "poNumber" in order:
+        poNumber = order["poNumber"]
+
+    paidDate = ""
+    if "paidDate" in order:
+        paidDate = order["paidDate"]
+
+    # Printing order details
+    print("Order Reference Number:", orderNumber)
+    print("Effective Date:", orderDate)
+    print("End Date:", dueDate)
+    print("Sales Order Id:", salesOrderId)
+    print("Total Amount:", total)
+    print("Amount Paid:", amountPaid)
+    print("Timestamp:", timestamp)
+    print("PO Number:", poNumber)
+    print("Activated Date:", paidDate)
+    print("Account Id:", accountId)
+
+    # Creating the order
+    newOrder = sf.Order.create({
+        "OrderReferenceNumber": orderNumber,
+        "EffectiveDate": orderDate,
+        "EndDate": dueDate,
+        "Pricebook2Id": "01s5j00000Q9jTAAAZ",
+        "Sales_Order_Id__c": salesOrderId,
+        # "TotalAmount": total,
+        "Paid__c": amountPaid,
+        "Timestamp__c": timestamp,
+        "PO__c": poNumber,
+        # "ActivatedDate": paidDate,
+        "AccountId": accountId,
+        "Status":"Draft"
+    })
+
+    newOrderId = newOrder["id"]
+    return newOrderId
+
+def updateOrder(order):
+    print("Updating an Order")
+
+    # Extracting order details
+    salesOrderId = order.get("salesOrderId", "")
+    orderNumber = order.get("orderNumber", "")
+    orderDate = order.get("orderDate", "")
+    dueDate = order.get("dueDate", "")
+    total = order.get("total", 0)
+    amountPaid = order.get("amountPaid", 0)
+    timestamp = order.get("timestamp", "")
+    poNumber = order.get("poNumber", "")
+    paidDate = order.get("paidDate", "")
+    accountId = getSFAccount(order.get("customerId", ""))
+
+    # Printing extracted order details
+    print("Sales Order Id:", salesOrderId)
+    print("Order Reference Number:", orderNumber)
+    print("Effective Date:", orderDate)
+    print("End Date:", dueDate)
+    print("Total Amount:", total)
+    print("Amount Paid:", amountPaid)
+    print("Timestamp:", timestamp)
+    print("PO Number:", poNumber)
+    print("Activated Date:", paidDate)
+    print("Account Id:", accountId)
+
+    # Update the existing order
+    updatedOrder = sf.Order.update({
+        "Sales_Order_Id__c": salesOrderId,
+        "OrderReferenceNumber": orderNumber,
+        "EffectiveDate": orderDate,
+        "EndDate": dueDate,
+        "Pricebook2Id": "01s5j00000Q9jTAAAZ",  # Example Pricebook2Id, replace with actual ID if necessary
+        "TotalAmount": total,
+        "Paid__c": amountPaid,
+        "Timestamp__c": timestamp,
+        "PO__c": poNumber,
+        "ActivatedDate": paidDate,
+        "AccountId": accountId
+    })
+
+    print("Updated Order:", updatedOrder)
+     
+def createLineItems(lineItem, newOrderId,sfProducts):
+    print("Creating line item")
+    print(lineItem)
+    print("Current Sf products")
+    print(sfProducts)
+    for item in lineItem:
+        productId = ""
+        for product in sfProducts:
+            if product["Product_Id__c"] == item["productId"]:
+                productId = product["Id"]
+                break
+
+        description = ""
+        if "description" in item:
+            description = item["description"]
+
+        quantity = 0
+        if "quantity" in item:
+            quantity = item["quantity"]["standardQuantity"]
+
+        orderValue = 0
+        if "unitPrice" in item:
+            orderValue = item["unitPrice"]
+
+        lineItemID = ""
+        if "salesOrderLineId" in item:
+            lineItemID = item["salesOrderLineId"]
+
+        timestamp = ""
+        if "timestamp" in item:
+            timestamp = item["timestamp"]
+
+        getPriceBookEntryQuery = f"select Id,name from PricebookEntry where Product2Id = '{productId}'"
+        print("\nGet PriceBook Entry query: ", getPriceBookEntryQuery)
+        getPriceBookEntryResult = sf.query_all(getPriceBookEntryQuery)["records"]
+        print("\nGet PriceBook Entry Results: ", getPriceBookEntryResult[0])
+        pricebookEntryId = getPriceBookEntryResult[0].get("Id")
+        
+        print("Product:", productId)
+        print("Description:", description)
+        print("Quantity:", quantity)
+        print("Order Value:", orderValue)
+        print("LineItemID: ", lineItemID)
+        print("Timestamp: ", timestamp)
+        print("PriceBook Entry id", pricebookEntryId)
+
+        if quantity == 0:
+            print('Product {productId} quantity was 0. It was not added to the order')
+            pass
+        else:
+            createOrderItem = sf.OrderItem.create({
+                "OrderId": newOrderId,
+                "Product2Id": productId,
+                "PricebookEntryId": pricebookEntryId,
+                "Description": description,
+                "Quantity": quantity,
+                "UnitPrice": orderValue,
+                "Inflow_External_line_Id__c": lineItemID,
+                "Timestamp__c": timestamp,
+            })
+            print("Created Order Item: ", createOrderItem)
+            print("Line Item: ", product, description, quantity, orderValue)
+
+def updateLineItems(item, sfProducts):
+    print("Updating line item")
+
+    # Extracting product ID from sfProducts
+    productId = ""
+    for product in sfProducts:
+        if product["Product_Id__c"] == item["productId"]:
+            productId = product["Id"]
+            break
+
+    # Extracting other line item details
+    description = item.get("description", "")
+    quantity = item.get("quantity", {}).get("standardQuantity", 0)
+    orderValue = item.get("unitPrice", 0)
+    lineItemID = item.get("salesOrderLineId", "")
+    timestamp = item.get("timestamp", "")
+
+    # Printing line item details
+    print("Product:", productId)
+    print("Description:", description)
+    print("Quantity:", quantity)
+    print("Order Value:", orderValue)
+    print("LineItemID: ", lineItemID)
+    print("Timestamp: ", timestamp)
+
+    # Check for non-zero quantity before updating
+    if quantity > 0:
+        updatedOrderItem = sf.OrderItem.update({
+            "Id": lineItemID,  # Assuming this is the identifier for the line item in Salesforce
+            "Product2Id": productId,
+            "Description": description,
+            "Quantity": quantity,
+            "UnitPrice": orderValue,
+            "Timestamp": timestamp,
+            # Include any other fields that need to be updated
+        })
+        print("Updated Order Item: ", updatedOrderItem)
+    else:
+        print("Skipping update for zero quantity line item")
+
+def productExists(productId, sfProducts):
+    print("Product we are looking for: ", productId)
+    if sfProducts == None or len(sfProducts) < 1:
+        return False
+    for product in sfProducts:
+        print("Current Product: ", product["Product_Id__c"])
+        if product["Product_Id__c"] == productId:
+            print("Found Product")
+            return True
+        else: 
+            continue
+    return False
+
 def processNewOrder(inflowOrder, salesforceProducts):
     # print(inflowOrder)
     for lineItem in inflowOrder['lines']:
-        if salesforceProducts == None or lineItem['productId'] not in salesforceProducts:
+        # if salesforceProducts == None or lineItem['productId'] not in salesforceProducts:
+        if productExists(lineItem["productId"], salesforceProducts) == False:
             # INSERT product2 with lineItem
             print(f'Product {lineItem["productId"]} was not found on SF')
+            print(f'Creating {lineItem["productId"]} in SF')
+
             productInfo = getInflowProduct(lineItem["productId"])
-
-            productToCreate = {
-                "timestamp__c": productInfo["timestamp"],
-                "Product_Id__c":productInfo["productId"],
-                "isActive":productInfo["isActive"],
-                "Name":productInfo["name"],
-                "Description":productInfo["description"]
-            }
-            # createdProduct = sf.Product2.create(productToCreate)
-            # print(f'Created product: {createdProduct}')
-            print(salesforceProducts)
-
-            continue
-        print(salesforceProducts)
-
-        # UPDATE product2 with lineItem
-        if lineItem["timestamp"] != salesforceProducts["timestamp__c"]:
-            pass
-        break
+            
+            createdProduct = createProduct(productInfo,salesforceProducts)
+            print(f'Created product: {createdProduct}')
+        pass
     # INSERT into saleOrder with inflowOrder
+    orderId = createOrder(inflowOrder)
     # Attach line items to saleOrder
+    createLineItems(inflowOrder['lines'],orderId,salesforceProducts)
     return
 
-def processExistingOrder(inflowOrder, salesforceOrders,sfOrder):
-    if inflowOrder['timestamp'] != salesforceOrders[inflowOrder['id']]['timestamp']:
+def processExistingOrder(inflowOrder, salesforceOrder,sfProducts):
+    print(inflowOrder)
+    if inflowOrder['timestamp'] != salesforceOrder['Timestamp__c']:
         #UPDATE salesOrder where external id = infowOrder["orderId"]
+        orderId = updateOrder(inflowOrder)
         for lineItem in inflowOrder['lines']:
-            # sfOrderItem = getSFOrder(id)#Get  salesforceOrderItems.get(lineItem['id'])
+            sfOrderItem = getSFOrder(id)#Get  salesforceOrderItems.get(lineItem['id'])
 
             if not sfOrderItem:
+                print(f'Product {lineItem["productId"]} was not found on SF')
+                print(f'Creating {lineItem["productId"]} in SF')
                 productInfo = getInflowProduct(lineItem["productId"])
                 # INSERT into products with productInfo
+                createdProduct = createProduct(productInfo)
+                print(f'Created product: {createdProduct}')
                 pass
-            elif lineItem['timestamp'] != sfOrderItem['timestamp']:
+            if lineItem['timestamp'] != sfOrderItem['timestamp']:
                 # UPDATE saleOrderItem 
+                updateLineItems(lineItem,sfProducts)
                 pass
     return
 
@@ -151,20 +495,22 @@ def getInflowSaleOrders():
         "Authorization": f"Bearer {INFLOW_API_KEY}",
         "Content-Type": "application/json"
     }
-
+    print("Getting inflow saleOrders")
     all_orders = []
     last_entity_id = None
-    count = 100  # Maximum number of entities per request
+    count = 1  # Maximum number of entities per request
     start_time = datetime.now()
-    params = {"count": count, "after": last_entity_id, "sort": "salesOrderId", "include":"lines"}
-
+    
+    total = 0
     while True:
+        print(f'Requesting inflow orders')
+        params = {"count": count, "after": last_entity_id, "sort": "salesOrderId", "include":"lines,customer", "includeCount":"true"}
         response = requests.get(requestURL, headers=headers, params=params)
 
         rate_limit_info = response.headers.get('X-inflow-api-rate-limit', '0/0')
         requests_left, max_requests = map(int, rate_limit_info.split('/'))
 
-        if requests_left < 5:  # Threshold for remaining requests
+        if requests_left < 1:  # Threshold for remaining requests
             wait_time = 60 - (datetime.now() - start_time).seconds
             print(f"Approaching rate limit. Waiting for {wait_time} seconds.")
             time.sleep(wait_time)
@@ -183,16 +529,19 @@ def getInflowSaleOrders():
 
         orders = response.json()
         all_orders.extend(orders)
+        total += len(orders)
+        listCount = response.headers.get('X-listCount')
+        # print(orders)
+        print(f'Received {total} out of {listCount} inflow orders')
 
         if len(orders) < count:
             break  # Break the loop if we've got less than count orders
-        # break
+        break
         last_entity_id = orders[-1]['salesOrderId']
+        print(last_entity_id)
 
     print(f"Total orders fetched: {len(all_orders)}")
-    print(all_orders[0])
     extracted_data = [{key: obj.get(key, None) for key in keys_to_extract} for obj in all_orders]
-    print(extracted_data[0])
     return extracted_data
 
 def getInflowProduct(productId, max_retries=10):
